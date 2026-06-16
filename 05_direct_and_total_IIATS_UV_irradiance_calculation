@@ -1,0 +1,158 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION AND FOLDER CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "PAY", "DAV"
+station_name <- "STATION_CODE"
+
+# Enter the path to the folder containing the CSV files
+# produced by 04_diffuse_IIATS_UV_irradiance_calculation.R
+input_folder <- "PATH_TO_DIFFUSE_IIATS_UV_RESULTS_FOLDER"
+
+# Output folder for direct and total IIATS_UV irradiance results
+output_folder <- file.path(input_folder, "Direct_total_IIATS_UV_results")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# =========================================================
+# UTILITY FUNCTION FOR ROBUST NUMERIC CONVERSION
+# =========================================================
+
+clean_numeric <- function(x) {
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA
+  suppressWarnings(as.numeric(x))
+}
+
+# =========================================================
+# DIRECT NORMAL IIATS_UV IRRADIANCE FUNCTION
+# =========================================================
+
+direct_IIATS_UV_function <- function(
+  E0_spencer,
+  tau_total,
+  Gsc_uv = 102
+) {
+  Gsc_uv * E0_spencer * tau_total
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder: ", input_folder)
+}
+
+# =========================================================
+# PROCESS EACH FILE
+# =========================================================
+
+for (f in files) {
+  
+  file_name <- basename(f)
+  
+  cat("Processing station:", station_name,
+      "| File:", file_name, "\n")
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  required_columns <- c(
+    "zenith",
+    "E0_spencer",
+    "tau_total",
+    "Gdiffuse_IIATS_UV"
+  )
+  
+  missing_columns <- setdiff(required_columns, names(df))
+  
+  if (length(missing_columns) > 0) {
+    cat(
+      "  -> Skipping file. Missing columns:",
+      paste(missing_columns, collapse = ", "),
+      "\n\n"
+    )
+    next
+  }
+  
+  for (col in required_columns) {
+    df[[col]] <- clean_numeric(df[[col]])
+  }
+  
+  # Non-physical zenith angles are set to NA
+  df$zenith[df$zenith < 0] <- NA
+  df$zenith[df$zenith > 90] <- NA
+  
+  cos_z <- cos(df$zenith * pi / 180)
+  cos_z[!is.na(cos_z) & cos_z < 0] <- 0
+  
+  # ------------------------------------------------
+  # Direct normal irradiance
+  # ------------------------------------------------
+  
+  df$Gdirect_IIATS_UV <- direct_IIATS_UV_function(
+    E0_spencer = df$E0_spencer,
+    tau_total = df$tau_total
+  )
+  
+  df$Gdirect_IIATS_UV[is.nan(df$Gdirect_IIATS_UV)] <- NA
+  df$Gdirect_IIATS_UV[is.infinite(df$Gdirect_IIATS_UV)] <- NA
+  df$Gdirect_IIATS_UV[
+    !is.na(df$Gdirect_IIATS_UV) &
+    df$Gdirect_IIATS_UV < 0
+  ] <- NA
+  
+  # ------------------------------------------------
+  # Total horizontal irradiance
+  # ------------------------------------------------
+  
+  df$Gtotal_IIATS_UV <-
+    df$Gdirect_IIATS_UV * cos_z +
+    df$Gdiffuse_IIATS_UV
+  
+  df$Gtotal_IIATS_UV[is.nan(df$Gtotal_IIATS_UV)] <- NA
+  df$Gtotal_IIATS_UV[is.infinite(df$Gtotal_IIATS_UV)] <- NA
+  df$Gtotal_IIATS_UV[
+    !is.na(df$Gtotal_IIATS_UV) &
+    df$Gtotal_IIATS_UV < 0
+  ] <- NA
+  
+  cat("  NA zenith:", sum(is.na(df$zenith)), "\n")
+  cat("  NA Gdirect_IIATS_UV:", 
+      sum(is.na(df$Gdirect_IIATS_UV)), "\n")
+  cat("  NA Gtotal_IIATS_UV:", 
+      sum(is.na(df$Gtotal_IIATS_UV)), "\n")
+  
+  output_file <- file.path(
+    output_folder,
+    file_name
+  )
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE,
+    na = "NA"
+  )
+  
+  cat("Saved:", output_file, "\n\n")
+}
+
+cat("Processing completed.\n")
+cat("Files containing Gdirect_IIATS_UV and Gtotal_IIATS_UV were saved in:\n")
+cat(output_folder, "\n")
