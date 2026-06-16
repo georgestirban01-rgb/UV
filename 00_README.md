@@ -4,12 +4,12 @@ The IIATS_UV model workflow consists of seven sequential processing steps. Each 
 
 ---
 
-## Step 1 — Atmospheric air mass calculation
+ Step 1 — Atmospheric air mass calculation
 
 Script:
 
 ```r
-01_air_mass_calculation.R
+01_air_mass_calculation
 ```
 
 This script calculates the atmospheric optical air masses for Rayleigh scattering, uniformly mixed gases, ozone, water vapor, and aerosols based on the solar zenith angle. The Rayleigh air mass is additionally corrected according to the station altitude.
@@ -18,12 +18,12 @@ Output: Atmospheric air mass data used as input for Step 2.
 
 ---
 
-## Step 2 — Broadband atmospheric transmittance calculation
+ Step 2 — Broadband atmospheric transmittance calculation
 
 Script:
 
 ```r
-02_broadband_transmittance_calculation.R
+02_broadband_transmittance_calculation
 ```
 
 This script calculates broadband atmospheric transmittance components, including gas, Rayleigh, aerosol, ozone, and water vapor transmittances, as well as the total atmospheric transmittance.
@@ -34,12 +34,12 @@ Output: Broadband atmospheric transmittance data used as input for Step 3.
 
 ---
 
-## Step 3 — Forward scattering correction factor calculation
+ Step 3 — Forward scattering correction factor calculation
 
 Script:
 
 ```r
-03_forward_scattering_correction_Fa1.R
+03_forward_scattering_correction_Fa1
 ```
 
 This script calculates the aerosol forward scattering correction factor (Fa1) using the solar zenith angle and the aerosol asymmetry factor (g).
@@ -48,12 +48,12 @@ Output: Fa1 correction factors used as input for Step 4.
 
 ---
 
-## Step 4 — Diffuse IIATS_UV irradiance calculation
+ Step 4 — Diffuse IIATS_UV irradiance calculation
 
 Script:
 
 ```r
-04_diffuse_IIATS_UV_irradiance_calculation.R
+04_diffuse_IIATS_UV_irradiance_calculation
 ```
 
 This script calculates the diffuse ultraviolet irradiance component of the IIATS_UV model using atmospheric transmittances, the Fa1 correction factor, and the aerosol single scattering albedo (SSA).
@@ -62,12 +62,12 @@ Output: Diffuse IIATS_UV irradiance used as input for Step 5.
 
 ---
 
-## Step 5 — Direct and total IIATS_UV irradiance calculation
+Step 5 — Direct and total IIATS_UV irradiance calculation
 
 Script:
 
 ```r
-05_direct_and_total_IIATS_UV_irradiance_calculation.R
+05_direct_and_total_IIATS_UV_irradiance_calculation
 ```
 
 This script calculates:
@@ -80,12 +80,12 @@ Output: Complete IIATS_UV irradiance dataset used as input for Step 6.
 
 ---
 
-## Step 6 — FASTUV comparison model calculation
+Step 6 — FASTUV comparison model calculation
 
 Script:
 
 ```r
-06_FASTUV_comparison_model_calculation.R
+06_FASTUV_comparison_model_calculation
 ```
 
 This script calculates the clear-sky ultraviolet irradiance using the FASTUV model for comparison with the IIATS_UV model. It computes FASTUV broadband transmittances, direct irradiance, diffuse irradiance, and total horizontal irradiance.
@@ -94,12 +94,12 @@ Output: IIATS_UV and FASTUV datasets used as input for Step 7.
 
 ---
 
-## Step 7 — Final dataset selection and statistical analysis
+Step 7 — Final dataset selection and statistical analysis
 
 Script:
 
 ```r
-07_final_file_selection_and_statistics_table.R
+07_final_file_selection_and_statistics_table
 ```
 
 This final step performs:
@@ -110,17 +110,3 @@ This final step performs:
 Output: Final statistical tables in CSV and TXT formats.
 
 ---
-
-## Complete execution sequence
-
-The complete workflow must be executed in the following order:
-
-1. 01_air_mass_calculation.R  
-2. 02_broadband_transmittance_calculation.R  
-3. 03_forward_scattering_correction_Fa1.R  
-4. 04_diffuse_IIATS_UV_irradiance_calculation.R  
-5. 05_direct_and_total_IIATS_UV_irradiance_calculation.R  
-6. 06_FASTUV_comparison_model_calculation.R  
-7. 07_final_file_selection_and_statistics_table.R
-
-The final output includes the calculated IIATS_UV and FASTUV irradiance datasets and the statistical evaluation of both models against measured UV irradiance.
