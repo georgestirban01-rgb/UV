@@ -1,0 +1,492 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION AND FOLDER CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "PAY", "DAV"
+station_name <- "STATION_CODE"
+
+# Enter the path to the folder containing the CSV files
+# produced by 05_direct_and_total_IIATS_UV_irradiance_calculation.R
+input_folder <- "PATH_TO_DIRECT_TOTAL_IIATS_UV_RESULTS_FOLDER"
+
+# Output folder for FASTUV comparison results
+output_folder <- file.path(input_folder, "FASTUV_comparison_results")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# =========================================================
+# UTILITY FUNCTION FOR ROBUST NUMERIC CONVERSION
+# =========================================================
+
+clean_numeric <- function(x) {
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA
+  x <- gsub(",", ".", x, fixed = TRUE)
+  suppressWarnings(as.numeric(x))
+}
+
+# =========================================================
+# FASTUV BROADBAND TRANSMITTANCE FUNCTIONS
+# =========================================================
+
+tau_rayleigh_FASTUV_function <- function(m) {
+  exp(-1.0629 * m^0.3484) + exp(-0.4904 * m^0.6513)
+}
+
+tau_ozone_FASTUV_function <- function(m, lo3) {
+  (-0.8313) * (m * lo3)^0.0586 + 1.624
+}
+
+tau_aerosols_FASTUV_function <- function(m, beta) {
+  exp(-4.5664 * m * beta^0.3943) +
+    exp(-3.5678 * m * beta^0.6053)
+}
+
+tau_beam_FASTUV_function <- function(tau_rayleigh, tau_ozone, tau_aerosols) {
+  tau_rayleigh * tau_ozone * tau_aerosols
+}
+
+tau_diffuse_FASTUV_function <- function(tau_rayleigh, tau_ozone, tau_aerosols) {
+  0.5 * tau_ozone * (1 - tau_rayleigh * tau_aerosols)
+}
+
+# =========================================================
+# FASTUV IRRADIANCE FUNCTIONS
+# =========================================================
+
+Gdirect_FASTUV_function <- function(E0_spencer, tau_beam, Gsc_uv = 102) {
+  Gsc_uv * E0_spencer * tau_beam
+}
+
+Gdiffuse_FASTUV_function <- function(zenith_deg, E0_spencer, tau_diffuse, Gsc_uv = 102) {
+  
+  z <- suppressWarnings(as.numeric(zenith_deg))
+  
+  z[z < 0] <- NA
+  z[z > 90] <- NA
+  
+  cos_z <- cos(z * pi / 180)
+  cos_z[!is.na(cos_z) & cos_z < 0] <- NA
+  
+  Gsc_uv * E0_spencer * tau_diffuse * cos_z
+}
+
+# =========================================================
+# QUALITY CONTROL FUNCTIONS
+# =========================================================
+
+clean_transmittance <- function(x, variable_name, file_name) {
+  
+  x <- suppressWarnings(as.numeric(x))
+  
+  n_nan <- sum(is.nan(x))
+  n_inf <- sum(is.infinite(x))
+  n_below_0 <- sum(!is.na(x) & !is.nan(x) & !is.infinite(x) & x < 0)
+  n_above_1 <- sum(!is.na(x) & !is.nan(x) & !is.infinite(x) & x > 1)
+  n_total <- n_nan + n_inf + n_below_0 + n_above_1
+  
+  cat(
+    "  [", file_name, "] ", variable_name,
+    " -> invalid: ", n_total,
+    " (NaN: ", n_nan,
+    ", Inf: ", n_inf,
+    ", below 0: ", n_below_0,
+    ", above 1: ", n_above_1, ")\n",
+    sep = ""
+  )
+  
+  x[is.nan(x)] <- NA
+  x[is.infinite(x)] <- NA
+  x[!is.na(x) & x < 0] <- NA
+  x[!is.na(x) & x > 1] <- NA
+  
+  list(
+    x = x,
+    n_nan = n_nan,
+    n_inf = n_inf,
+    n_below_0 = n_below_0,
+    n_above_1 = n_above_1,
+    n_total = n_total
+  )
+}
+
+clean_irradiance <- function(x, variable_name, file_name) {
+  
+  x <- suppressWarnings(as.numeric(x))
+  
+  n_nan <- sum(is.nan(x))
+  n_inf <- sum(is.infinite(x))
+  n_below_0 <- sum(!is.na(x) & !is.nan(x) & !is.infinite(x) & x < 0)
+  n_total <- n_nan + n_inf + n_below_0
+  
+  cat(
+    "  [", file_name, "] ", variable_name,
+    " -> invalid: ", n_total,
+    " (NaN: ", n_nan,
+    ", Inf: ", n_inf,
+    ", below 0: ", n_below_0, ")\n",
+    sep = ""
+  )
+  
+  x[is.nan(x)] <- NA
+  x[is.infinite(x)] <- NA
+  x[!is.na(x) & x < 0] <- NA
+  
+  list(
+    x = x,
+    n_nan = n_nan,
+    n_inf = n_inf,
+    n_below_0 = n_below_0,
+    n_total = n_total
+  )
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder: ", input_folder)
+}
+
+# =========================================================
+# SUMMARY TABLE FOR INVALID VALUES
+# =========================================================
+
+invalid_summary <- data.frame(
+  file = character(),
+  n_rows = integer(),
+  
+  tau_rayleigh_FASTUV_nan = integer(),
+  tau_rayleigh_FASTUV_inf = integer(),
+  tau_rayleigh_FASTUV_below_0 = integer(),
+  tau_rayleigh_FASTUV_above_1 = integer(),
+  tau_rayleigh_FASTUV_total_invalid = integer(),
+  
+  tau_ozone_FASTUV_nan = integer(),
+  tau_ozone_FASTUV_inf = integer(),
+  tau_ozone_FASTUV_below_0 = integer(),
+  tau_ozone_FASTUV_above_1 = integer(),
+  tau_ozone_FASTUV_total_invalid = integer(),
+  
+  tau_aerosols_FASTUV_nan = integer(),
+  tau_aerosols_FASTUV_inf = integer(),
+  tau_aerosols_FASTUV_below_0 = integer(),
+  tau_aerosols_FASTUV_above_1 = integer(),
+  tau_aerosols_FASTUV_total_invalid = integer(),
+  
+  tau_beam_FASTUV_nan = integer(),
+  tau_beam_FASTUV_inf = integer(),
+  tau_beam_FASTUV_below_0 = integer(),
+  tau_beam_FASTUV_above_1 = integer(),
+  tau_beam_FASTUV_total_invalid = integer(),
+  
+  tau_diffuse_FASTUV_nan = integer(),
+  tau_diffuse_FASTUV_inf = integer(),
+  tau_diffuse_FASTUV_below_0 = integer(),
+  tau_diffuse_FASTUV_above_1 = integer(),
+  tau_diffuse_FASTUV_total_invalid = integer(),
+  
+  Gdirect_FASTUV_nan = integer(),
+  Gdirect_FASTUV_inf = integer(),
+  Gdirect_FASTUV_below_0 = integer(),
+  Gdirect_FASTUV_total_invalid = integer(),
+  
+  Gdiffuse_FASTUV_nan = integer(),
+  Gdiffuse_FASTUV_inf = integer(),
+  Gdiffuse_FASTUV_below_0 = integer(),
+  Gdiffuse_FASTUV_total_invalid = integer(),
+  
+  Gtotal_FASTUV_nan = integer(),
+  Gtotal_FASTUV_inf = integer(),
+  Gtotal_FASTUV_below_0 = integer(),
+  Gtotal_FASTUV_total_invalid = integer(),
+  Gtotal_FASTUV_valid_final = integer(),
+  
+  rows_with_at_least_one_NA = integer(),
+  
+  stringsAsFactors = FALSE
+)
+
+# =========================================================
+# PROCESS EACH FILE
+# =========================================================
+
+for (f in files) {
+  
+  file_name <- basename(f)
+  
+  cat("Processing station:", station_name,
+      "| File:", file_name, "\n")
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  required_columns <- c(
+    "air_mass_rayleigh_corrected",
+    "air_mass_ozone",
+    "air_mass_aerosols",
+    "zenith",
+    "E0_spencer",
+    "lo3cm",
+    "beta"
+  )
+  
+  missing_columns <- setdiff(required_columns, names(df))
+  
+  if (length(missing_columns) > 0) {
+    cat(
+      "  -> Skipping file. Missing required columns:",
+      paste(missing_columns, collapse = ", "),
+      "\n\n"
+    )
+    next
+  }
+  
+  for (col in required_columns) {
+    df[[col]] <- clean_numeric(df[[col]])
+  }
+  
+  df$air_mass_rayleigh_corrected[df$air_mass_rayleigh_corrected <= 0] <- NA
+  df$air_mass_ozone[df$air_mass_ozone <= 0] <- NA
+  df$air_mass_aerosols[df$air_mass_aerosols <= 0] <- NA
+  df$lo3cm[df$lo3cm <= 0] <- NA
+  df$beta[df$beta <= 0] <- NA
+  df$zenith[df$zenith < 0] <- NA
+  df$zenith[df$zenith > 90] <- NA
+  
+  # FASTUV raw transmittances
+  tau_rayleigh_raw <- tau_rayleigh_FASTUV_function(
+    df$air_mass_rayleigh_corrected
+  )
+  
+  tau_ozone_raw <- tau_ozone_FASTUV_function(
+    df$air_mass_ozone,
+    df$lo3cm
+  )
+  
+  tau_aerosols_raw <- tau_aerosols_FASTUV_function(
+    df$air_mass_aerosols,
+    df$beta
+  )
+  
+  # Quality control for FASTUV transmittances
+  res_tau_rayleigh <- clean_transmittance(
+    tau_rayleigh_raw,
+    "tau_rayleigh_FASTUV",
+    file_name
+  )
+  
+  res_tau_ozone <- clean_transmittance(
+    tau_ozone_raw,
+    "tau_ozone_FASTUV",
+    file_name
+  )
+  
+  res_tau_aerosols <- clean_transmittance(
+    tau_aerosols_raw,
+    "tau_aerosols_FASTUV",
+    file_name
+  )
+  
+  df$tau_rayleigh_FASTUV <- res_tau_rayleigh$x
+  df$tau_ozone_FASTUV <- res_tau_ozone$x
+  df$tau_aerosols_FASTUV <- res_tau_aerosols$x
+  
+  # FASTUV beam and diffuse transmittances
+  tau_beam_raw <- tau_beam_FASTUV_function(
+    df$tau_rayleigh_FASTUV,
+    df$tau_ozone_FASTUV,
+    df$tau_aerosols_FASTUV
+  )
+  
+  tau_diffuse_raw <- tau_diffuse_FASTUV_function(
+    df$tau_rayleigh_FASTUV,
+    df$tau_ozone_FASTUV,
+    df$tau_aerosols_FASTUV
+  )
+  
+  res_tau_beam <- clean_transmittance(
+    tau_beam_raw,
+    "tau_beam_FASTUV",
+    file_name
+  )
+  
+  res_tau_diffuse <- clean_transmittance(
+    tau_diffuse_raw,
+    "tau_diffuse_FASTUV",
+    file_name
+  )
+  
+  df$tau_beam_FASTUV <- res_tau_beam$x
+  df$tau_diffuse_FASTUV <- res_tau_diffuse$x
+  
+  # FASTUV direct irradiance
+  Gdirect_raw <- Gdirect_FASTUV_function(
+    E0_spencer = df$E0_spencer,
+    tau_beam = df$tau_beam_FASTUV
+  )
+  
+  res_Gdirect <- clean_irradiance(
+    Gdirect_raw,
+    "Gdirect_FASTUV",
+    file_name
+  )
+  
+  df$Gdirect_FASTUV <- res_Gdirect$x
+  
+  # FASTUV diffuse irradiance
+  Gdiffuse_raw <- Gdiffuse_FASTUV_function(
+    zenith_deg = df$zenith,
+    E0_spencer = df$E0_spencer,
+    tau_diffuse = df$tau_diffuse_FASTUV
+  )
+  
+  res_Gdiffuse <- clean_irradiance(
+    Gdiffuse_raw,
+    "Gdiffuse_FASTUV",
+    file_name
+  )
+  
+  df$Gdiffuse_FASTUV <- res_Gdiffuse$x
+  
+  cos_z <- cos(df$zenith * pi / 180)
+  cos_z[!is.na(cos_z) & cos_z < 0] <- 0
+  
+  Gtotal_raw <- df$Gdiffuse_FASTUV + df$Gdirect_FASTUV * cos_z
+  
+  res_Gtotal <- clean_irradiance(
+    Gtotal_raw,
+    "Gtotal_FASTUV",
+    file_name
+  )
+  
+  df$Gtotal_FASTUV <- res_Gtotal$x
+  
+  n_Gtotal_valid <- sum(!is.na(df$Gtotal_FASTUV))
+  
+  cat(
+    "  Final valid Gtotal_FASTUV rows: ",
+    n_Gtotal_valid,
+    " out of ",
+    nrow(df),
+    "\n",
+    sep = ""
+  )
+  
+  output_file <- file.path(output_folder, file_name)
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE,
+    na = "NA"
+  )
+  
+  n_rows_with_na <- sum(rowSums(is.na(df)) > 0)
+  
+  cat(
+    "  Rows with at least one NA: ",
+    n_rows_with_na,
+    " out of ",
+    nrow(df),
+    "\n",
+    sep = ""
+  )
+  
+  invalid_summary <- rbind(
+    invalid_summary,
+    data.frame(
+      file = file_name,
+      n_rows = nrow(df),
+      
+      tau_rayleigh_FASTUV_nan = res_tau_rayleigh$n_nan,
+      tau_rayleigh_FASTUV_inf = res_tau_rayleigh$n_inf,
+      tau_rayleigh_FASTUV_below_0 = res_tau_rayleigh$n_below_0,
+      tau_rayleigh_FASTUV_above_1 = res_tau_rayleigh$n_above_1,
+      tau_rayleigh_FASTUV_total_invalid = res_tau_rayleigh$n_total,
+      
+      tau_ozone_FASTUV_nan = res_tau_ozone$n_nan,
+      tau_ozone_FASTUV_inf = res_tau_ozone$n_inf,
+      tau_ozone_FASTUV_below_0 = res_tau_ozone$n_below_0,
+      tau_ozone_FASTUV_above_1 = res_tau_ozone$n_above_1,
+      tau_ozone_FASTUV_total_invalid = res_tau_ozone$n_total,
+      
+      tau_aerosols_FASTUV_nan = res_tau_aerosols$n_nan,
+      tau_aerosols_FASTUV_inf = res_tau_aerosols$n_inf,
+      tau_aerosols_FASTUV_below_0 = res_tau_aerosols$n_below_0,
+      tau_aerosols_FASTUV_above_1 = res_tau_aerosols$n_above_1,
+      tau_aerosols_FASTUV_total_invalid = res_tau_aerosols$n_total,
+      
+      tau_beam_FASTUV_nan = res_tau_beam$n_nan,
+      tau_beam_FASTUV_inf = res_tau_beam$n_inf,
+      tau_beam_FASTUV_below_0 = res_tau_beam$n_below_0,
+      tau_beam_FASTUV_above_1 = res_tau_beam$n_above_1,
+      tau_beam_FASTUV_total_invalid = res_tau_beam$n_total,
+      
+      tau_diffuse_FASTUV_nan = res_tau_diffuse$n_nan,
+      tau_diffuse_FASTUV_inf = res_tau_diffuse$n_inf,
+      tau_diffuse_FASTUV_below_0 = res_tau_diffuse$n_below_0,
+      tau_diffuse_FASTUV_above_1 = res_tau_diffuse$n_above_1,
+      tau_diffuse_FASTUV_total_invalid = res_tau_diffuse$n_total,
+      
+      Gdirect_FASTUV_nan = res_Gdirect$n_nan,
+      Gdirect_FASTUV_inf = res_Gdirect$n_inf,
+      Gdirect_FASTUV_below_0 = res_Gdirect$n_below_0,
+      Gdirect_FASTUV_total_invalid = res_Gdirect$n_total,
+      
+      Gdiffuse_FASTUV_nan = res_Gdiffuse$n_nan,
+      Gdiffuse_FASTUV_inf = res_Gdiffuse$n_inf,
+      Gdiffuse_FASTUV_below_0 = res_Gdiffuse$n_below_0,
+      Gdiffuse_FASTUV_total_invalid = res_Gdiffuse$n_total,
+      
+      Gtotal_FASTUV_nan = res_Gtotal$n_nan,
+      Gtotal_FASTUV_inf = res_Gtotal$n_inf,
+      Gtotal_FASTUV_below_0 = res_Gtotal$n_below_0,
+      Gtotal_FASTUV_total_invalid = res_Gtotal$n_total,
+      Gtotal_FASTUV_valid_final = n_Gtotal_valid,
+      
+      rows_with_at_least_one_NA = n_rows_with_na,
+      
+      stringsAsFactors = FALSE
+    )
+  )
+  
+  cat("Saved:", output_file, "\n\n")
+}
+
+# =========================================================
+# SAVE INVALID VALUE SUMMARY
+# =========================================================
+
+summary_file <- file.path(
+  output_folder,
+  "invalid_FASTUV_values_summary.csv"
+)
+
+write.csv(
+  invalid_summary,
+  summary_file,
+  row.names = FALSE,
+  na = "NA"
+)
+
+cat("Processing completed.\n")
+cat("FASTUV files were saved in:\n")
+cat(output_folder, "\n")
+cat("Invalid value summary saved in:\n")
+cat(summary_file, "\n")
