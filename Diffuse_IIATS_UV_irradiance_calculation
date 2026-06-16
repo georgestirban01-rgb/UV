@@ -1,0 +1,218 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION AND FOLDER CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "PAY", "DAV"
+station_name <- "STATION_CODE"
+
+# Enter the path to the folder containing the CSV files
+# produced by 03_forward_scattering_correction_Fa1.R
+input_folder <- "PATH_TO_FA1_RESULTS_FOLDER"
+
+# Output folder for diffuse IIATS_UV irradiance results
+output_folder <- file.path(input_folder, "Diffuse_IIATS_UV_results")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# CSV file containing the single scattering albedo values for each input file
+# Required columns: file, SSA
+ssa_values_file <- file.path(output_folder, "SSA_values.csv")
+
+# =========================================================
+# UTILITY FUNCTION FOR NUMERIC CLEANING
+# =========================================================
+
+clean_numeric <- function(x) {
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA
+  x <- gsub(",", ".", x, fixed = TRUE)
+  suppressWarnings(as.numeric(x))
+}
+
+# =========================================================
+# DIFFUSE IIATS_UV IRRADIANCE FUNCTION
+# =========================================================
+
+Gdiffuse_IIATS_UV_function <- function(
+    zenith_deg,
+    E0_spencer,
+    tau_rayleigh,
+    tau_ozone,
+    tau_gases,
+    tau_aerosols,
+    Fa1,
+    ssa,
+    Gsc_uv = 102
+) {
+  
+  z <- suppressWarnings(as.numeric(zenith_deg))
+  
+  z[z < 0] <- NA
+  z[z > 90] <- NA
+  
+  cos_z <- cos(z * pi / 180)
+  cos_z[!is.na(cos_z) & cos_z < 0] <- 0
+  
+  term_1 <- 0.5 * (1 - tau_rayleigh) *
+    tau_ozone *
+    tau_gases *
+    tau_aerosols^(1 - ssa)
+  
+  term_2 <- Fa1 * ssa *
+    (1 - tau_aerosols^ssa) *
+    tau_ozone *
+    tau_gases *
+    tau_rayleigh *
+    tau_aerosols^(1 - ssa)
+  
+  Gsc_uv * E0_spencer * (term_1 + term_2) * cos_z
+}
+
+# =========================================================
+# READ SSA VALUES
+# =========================================================
+
+if (!file.exists(ssa_values_file)) {
+  stop("The file containing SSA values does not exist: ", ssa_values_file)
+}
+
+ssa_table <- read.csv(
+  ssa_values_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+if (!all(c("file", "SSA") %in% names(ssa_table))) {
+  stop("The file SSA_values.csv must contain the columns: file and SSA")
+}
+
+ssa_table$file <- trimws(as.character(ssa_table$file))
+ssa_table$SSA <- clean_numeric(ssa_table$SSA)
+
+if (any(is.na(ssa_table$SSA))) {
+  stop("Invalid SSA values were found in: ", ssa_values_file)
+}
+
+if (any(ssa_table$SSA <= 0 | ssa_table$SSA > 1)) {
+  stop("All SSA values must be within the interval (0, 1] in: ", ssa_values_file)
+}
+
+if (any(duplicated(ssa_table$file))) {
+  duplicated_files <- unique(ssa_table$file[duplicated(ssa_table$file)])
+  stop(
+    "Duplicate file names were found in SSA_values.csv: ",
+    paste(duplicated_files, collapse = ", ")
+  )
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder: ", input_folder)
+}
+
+files <- sort(files)
+
+# =========================================================
+# PROCESS EACH FILE
+# =========================================================
+
+for (f in files) {
+  
+  file_name <- basename(f)
+  
+  cat("\n========================================\n")
+  cat("Processing station:", station_name,
+      "| File:", file_name, "\n")
+  
+  idx <- which(ssa_table$file == file_name)
+  
+  if (length(idx) == 0) {
+    cat("  -> Skipping file. No SSA value found for this file in SSA_values.csv\n")
+    next
+  }
+  
+  current_ssa <- ssa_table$SSA[idx]
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  required_columns <- c(
+    "zenith",
+    "E0_spencer",
+    "tau_rayleigh",
+    "tau_ozone",
+    "tau_gases",
+    "tau_aerosols",
+    "Fa1"
+  )
+  
+  missing_columns <- setdiff(required_columns, names(df))
+  
+  if (length(missing_columns) > 0) {
+    cat(
+      "  -> Skipping file. Missing required columns:",
+      paste(missing_columns, collapse = ", "),
+      "\n"
+    )
+    next
+  }
+  
+  for (col in required_columns) {
+    df[[col]] <- clean_numeric(df[[col]])
+  }
+  
+  Gdiffuse_raw <- Gdiffuse_IIATS_UV_function(
+    zenith_deg = df$zenith,
+    E0_spencer = df$E0_spencer,
+    tau_rayleigh = df$tau_rayleigh,
+    tau_ozone = df$tau_ozone,
+    tau_gases = df$tau_gases,
+    tau_aerosols = df$tau_aerosols,
+    Fa1 = df$Fa1,
+    ssa = current_ssa
+  )
+  
+  Gdiffuse_raw[is.nan(Gdiffuse_raw)] <- NA
+  Gdiffuse_raw[is.infinite(Gdiffuse_raw)] <- NA
+  Gdiffuse_raw[!is.na(Gdiffuse_raw) & Gdiffuse_raw < 0] <- NA
+  
+  df$Gdiffuse_IIATS_UV <- Gdiffuse_raw
+  
+  cat("  SSA used:", current_ssa, "\n")
+  cat("  NA zenith:", sum(is.na(df$zenith)), "\n")
+  cat("  NA Gdiffuse_IIATS_UV:", sum(is.na(df$Gdiffuse_IIATS_UV)), "\n")
+  
+  output_file <- file.path(output_folder, file_name)
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE,
+    na = "NA"
+  )
+  
+  cat("Saved:", output_file, "\n")
+}
+
+cat("\n========================================\n")
+cat("Processing completed. Files with the Gdiffuse_IIATS_UV column were saved in:\n")
+cat(output_folder, "\n")
+cat("\nSSA values were read from:\n")
+cat(ssa_values_file, "\n")
