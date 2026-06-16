@@ -1,0 +1,492 @@
+library(data.table)
+
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+station_name <- "STATION_CODE"
+
+# Folder containing the processed CSV files
+input_folder <- "PATH_TO_PROCESSED_CSV_FOLDER"
+
+# Files containing g and SSA values
+g_values_file <- "PATH_TO_g_VALUES_FILE.csv"
+ssa_values_file <- "PATH_TO_SSA_VALUES_FILE.csv"
+
+# Minimum number of rows required to keep a file
+minimum_rows <- 100
+
+# Output folder
+output_folder <- file.path(input_folder, "Final")
+
+# Folder for final statistics table
+statistics_folder <- file.path(output_folder, "Statistics")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+if (!dir.exists(statistics_folder)) {
+  dir.create(statistics_folder, recursive = TRUE)
+}
+
+final_table_csv <- file.path(
+  statistics_folder,
+  "final_parameters_and_statistics_table.csv"
+)
+
+final_table_txt <- file.path(
+  statistics_folder,
+  "final_parameters_and_statistics_table.txt"
+)
+
+# =========================================================
+# UTILITY FUNCTIONS
+# =========================================================
+
+clean_numeric <- function(x) {
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA
+  x <- gsub(",", ".", x, fixed = TRUE)
+  suppressWarnings(as.numeric(x))
+}
+
+truncate4 <- function(x) {
+  if (is.na(x)) return(NA_real_)
+  trunc(x * 10000) / 10000
+}
+
+nRMSE_function <- function(sim, obs) {
+  if (length(sim) == 0 || length(obs) == 0) return(NA_real_)
+  if (mean(obs, na.rm = TRUE) == 0) return(NA_real_)
+  
+  sqrt(mean((sim - obs)^2, na.rm = TRUE)) /
+    mean(obs, na.rm = TRUE) * 100
+}
+
+nMBE_function <- function(sim, obs) {
+  if (length(sim) == 0 || length(obs) == 0) return(NA_real_)
+  if (mean(obs, na.rm = TRUE) == 0) return(NA_real_)
+  
+  mean(sim - obs, na.rm = TRUE) /
+    mean(obs, na.rm = TRUE) * 100
+}
+
+find_column <- function(df, possible_names, table_name = "") {
+  found <- intersect(possible_names, names(df))
+  
+  if (length(found) == 0) {
+    stop(
+      "No suitable column was found in ",
+      table_name,
+      ". Expected one of: ",
+      paste(possible_names, collapse = ", ")
+    )
+  }
+  
+  found[1]
+}
+
+# =========================================================
+# CHECK INPUT FILES
+# =========================================================
+
+if (!dir.exists(input_folder)) {
+  stop("Input folder does not exist: ", input_folder)
+}
+
+if (!file.exists(g_values_file)) {
+  stop("The g values file does not exist: ", g_values_file)
+}
+
+if (!file.exists(ssa_values_file)) {
+  stop("The SSA values file does not exist: ", ssa_values_file)
+}
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+files <- sort(files)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder: ", input_folder)
+}
+
+# =========================================================
+# STEP 1: KEEP ONLY FILES WITH AT LEAST minimum_rows ROWS
+# =========================================================
+
+file_selection_summary <- data.frame(
+  file = character(),
+  n_rows = integer(),
+  saved_to_final = character(),
+  stringsAsFactors = FALSE
+)
+
+selected_files <- character()
+
+for (f in files) {
+  
+  file_name <- basename(f)
+  cat("Checking:", file_name, "\n")
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  n_rows <- nrow(df)
+  
+  if (n_rows >= minimum_rows) {
+    
+    output_file <- file.path(output_folder, file_name)
+    
+    write.csv(
+      df,
+      output_file,
+      row.names = FALSE,
+      na = "NA"
+    )
+    
+    selected_files <- c(selected_files, output_file)
+    
+    cat("  Saved to Final:", output_file, "\n")
+    cat("  Rows:", n_rows, "\n\n")
+    
+    saved_status <- "YES"
+    
+  } else {
+    
+    cat("  Skipped: fewer than", minimum_rows, "rows\n")
+    cat("  Rows:", n_rows, "\n\n")
+    
+    saved_status <- "NO"
+  }
+  
+  file_selection_summary <- rbind(
+    file_selection_summary,
+    data.frame(
+      file = file_name,
+      n_rows = n_rows,
+      saved_to_final = saved_status,
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+selection_summary_file <- file.path(
+  output_folder,
+  "final_file_selection_summary.csv"
+)
+
+write.csv(
+  file_selection_summary,
+  selection_summary_file,
+  row.names = FALSE,
+  na = "NA"
+)
+
+if (length(selected_files) == 0) {
+  stop("No files met the minimum row requirement.")
+}
+
+# =========================================================
+# STEP 2: READ g AND SSA TABLES
+# =========================================================
+
+g_table <- fread(g_values_file)
+ssa_table <- fread(ssa_values_file)
+
+file_column_g <- find_column(
+  g_table,
+  c("file", "File", "fisier", "Fisier", "nume_fisier"),
+  "g values table"
+)
+
+g_column <- find_column(
+  g_table,
+  c("g", "g_mean", "mean_g", "g_used", "g_mediu", "g_folosit"),
+  "g values table"
+)
+
+file_column_ssa <- find_column(
+  ssa_table,
+  c("file", "File", "fisier", "Fisier", "nume_fisier"),
+  "SSA values table"
+)
+
+ssa_column <- find_column(
+  ssa_table,
+  c("SSA", "ssa", "SSA_mean", "mean_SSA", "SSA_medie", "ssa_medie"),
+  "SSA values table"
+)
+
+g_table[[file_column_g]] <- trimws(as.character(g_table[[file_column_g]]))
+ssa_table[[file_column_ssa]] <- trimws(as.character(ssa_table[[file_column_ssa]]))
+
+g_table[[g_column]] <- clean_numeric(g_table[[g_column]])
+ssa_table[[ssa_column]] <- clean_numeric(ssa_table[[ssa_column]])
+
+# =========================================================
+# STEP 3: COMPUTE FINAL PARAMETERS AND STATISTICS
+# =========================================================
+
+results <- list()
+
+for (f in selected_files) {
+  
+  file_name <- basename(f)
+  cat("Processing final statistics for:", file_name, "\n")
+  
+  data <- fread(f)
+  
+  measured_column <- find_column(
+    data,
+    c("UVGTOTAL", "G_measured", "Gtotal_measured"),
+    file_name
+  )
+  
+  fastuv_column <- find_column(
+    data,
+    c("Gtotal_FASTUV", "GtotalFASTUV"),
+    file_name
+  )
+  
+  model_column <- find_column(
+    data,
+    c("Gtotal_IIATS_UV", "GtotalEUG"),
+    file_name
+  )
+  
+  alpha_column <- find_column(
+    data,
+    c("alpha", "alfa"),
+    file_name
+  )
+  
+  beta_column <- find_column(
+    data,
+    c("beta"),
+    file_name
+  )
+  
+  ozone_column <- find_column(
+    data,
+    c("lo3cm", "ozone_cm"),
+    file_name
+  )
+  
+  base_name <- sub("\\.csv$", "", file_name, ignore.case = TRUE)
+  name_parts <- strsplit(base_name, "_")[[1]]
+  
+  if (length(name_parts) < 2) {
+    cat("  Skipping file: invalid file name format:", file_name, "\n\n")
+    next
+  }
+  
+  station <- name_parts[1]
+  date_string <- name_parts[2]
+  
+  date_parts <- strsplit(date_string, "-")[[1]]
+  
+  if (length(date_parts) != 3) {
+    cat("  Skipping file: invalid date in file name:", file_name, "\n\n")
+    next
+  }
+  
+  year <- date_parts[1]
+  month <- date_parts[2]
+  day <- date_parts[3]
+  
+  idx_g <- which(g_table[[file_column_g]] == file_name)
+  
+  if (length(idx_g) == 0) {
+    g_mean <- NA_real_
+    cat("  Warning: no g value found for this file.\n")
+  } else {
+    if (length(idx_g) > 1) {
+      cat("  Warning: multiple g values found. The first one is used.\n")
+      idx_g <- idx_g[1]
+    }
+    g_mean <- truncate4(g_table[[g_column]][idx_g])
+  }
+  
+  idx_ssa <- which(ssa_table[[file_column_ssa]] == file_name)
+  
+  if (length(idx_ssa) == 0) {
+    SSA_mean <- NA_real_
+    cat("  Warning: no SSA value found for this file.\n")
+  } else {
+    if (length(idx_ssa) > 1) {
+      cat("  Warning: multiple SSA values found. The first one is used.\n")
+      idx_ssa <- idx_ssa[1]
+    }
+    SSA_mean <- truncate4(ssa_table[[ssa_column]][idx_ssa])
+  }
+  
+  G_measured <- clean_numeric(data[[measured_column]])
+  G_FASTUV <- clean_numeric(data[[fastuv_column]])
+  G_IIATS_UV <- clean_numeric(data[[model_column]])
+  
+  alpha <- clean_numeric(data[[alpha_column]])
+  beta <- clean_numeric(data[[beta_column]])
+  lo3cm <- clean_numeric(data[[ozone_column]])
+  
+  alpha_mean <- truncate4(mean(alpha, na.rm = TRUE))
+  beta_mean <- truncate4(mean(beta, na.rm = TRUE))
+  lo3_mean <- truncate4(mean(lo3cm, na.rm = TRUE))
+  
+  if (is.nan(alpha_mean)) alpha_mean <- NA_real_
+  if (is.nan(beta_mean)) beta_mean <- NA_real_
+  if (is.nan(lo3_mean)) lo3_mean <- NA_real_
+  
+  valid_index <- complete.cases(
+    G_measured,
+    G_FASTUV,
+    G_IIATS_UV
+  )
+  
+  G_measured_valid <- G_measured[valid_index]
+  G_FASTUV_valid <- G_FASTUV[valid_index]
+  G_IIATS_UV_valid <- G_IIATS_UV[valid_index]
+  
+  n_valid <- length(G_measured_valid)
+  
+  if (n_valid == 0) {
+    cat("  Skipping file: no valid rows for statistics.\n\n")
+    next
+  }
+  
+  nRMSE_FASTUV <- truncate4(
+    nRMSE_function(G_FASTUV_valid, G_measured_valid)
+  )
+  
+  nMBE_FASTUV <- truncate4(
+    nMBE_function(G_FASTUV_valid, G_measured_valid)
+  )
+  
+  nRMSE_IIATS_UV <- truncate4(
+    nRMSE_function(G_IIATS_UV_valid, G_measured_valid)
+  )
+  
+  nMBE_IIATS_UV <- truncate4(
+    nMBE_function(G_IIATS_UV_valid, G_measured_valid)
+  )
+  
+  results[[length(results) + 1]] <- data.frame(
+    Station = station,
+    Year = year,
+    Month = month,
+    Day = day,
+    alpha_mean = alpha_mean,
+    beta_mean = beta_mean,
+    lo3_mean = lo3_mean,
+    g_mean = g_mean,
+    SSA_mean = SSA_mean,
+    nRMSE_FASTUV = nRMSE_FASTUV,
+    nMBE_FASTUV = nMBE_FASTUV,
+    nRMSE_IIATS_UV = nRMSE_IIATS_UV,
+    nMBE_IIATS_UV = nMBE_IIATS_UV,
+    n_valid_rows = n_valid,
+    stringsAsFactors = FALSE
+  )
+  
+  cat("  OK - valid rows for statistics:", n_valid, "\n\n")
+}
+
+if (length(results) == 0) {
+  stop("No valid files could be processed for the final statistics table.")
+}
+
+final_results <- do.call(rbind, results)
+
+final_results$Year_num <- suppressWarnings(as.numeric(final_results$Year))
+final_results$Month_num <- suppressWarnings(as.numeric(final_results$Month))
+final_results$Day_num <- suppressWarnings(as.numeric(final_results$Day))
+
+final_results <- final_results[
+  order(
+    final_results$Station,
+    final_results$Year_num,
+    final_results$Month_num,
+    final_results$Day_num
+  ),
+]
+
+final_results$Year_num <- NULL
+final_results$Month_num <- NULL
+final_results$Day_num <- NULL
+
+# =========================================================
+# EXPORT FINAL TABLES
+# =========================================================
+
+write.csv(
+  final_results,
+  file = final_table_csv,
+  row.names = FALSE,
+  na = "NA"
+)
+
+con <- file(final_table_txt, "w")
+
+header <- sprintf(
+  "%-10s %-6s %-6s %-6s %-12s %-12s %-12s %-12s %-12s %-15s %-15s %-15s %-15s %-12s",
+  "Station", "Year", "Month", "Day",
+  "alpha_mean", "beta_mean", "lo3_mean",
+  "g_mean", "SSA_mean",
+  "nRMSE_FASTUV", "nMBE_FASTUV",
+  "nRMSE_IIATS", "nMBE_IIATS",
+  "n_valid"
+)
+
+writeLines(header, con)
+writeLines(paste(rep("-", nchar(header)), collapse = ""), con)
+
+format_number <- function(x) {
+  if (is.na(x)) return("NA")
+  sprintf("%.4f", x)
+}
+
+for (i in 1:nrow(final_results)) {
+  
+  line <- sprintf(
+    "%-10s %-6s %-6s %-6s %-12s %-12s %-12s %-12s %-12s %-15s %-15s %-15s %-15s %-12s",
+    final_results$Station[i],
+    final_results$Year[i],
+    final_results$Month[i],
+    final_results$Day[i],
+    format_number(final_results$alpha_mean[i]),
+    format_number(final_results$beta_mean[i]),
+    format_number(final_results$lo3_mean[i]),
+    format_number(final_results$g_mean[i]),
+    format_number(final_results$SSA_mean[i]),
+    format_number(final_results$nRMSE_FASTUV[i]),
+    format_number(final_results$nMBE_FASTUV[i]),
+    format_number(final_results$nRMSE_IIATS_UV[i]),
+    format_number(final_results$nMBE_IIATS_UV[i]),
+    final_results$n_valid_rows[i]
+  )
+  
+  writeLines(line, con)
+}
+
+close(con)
+
+cat("Processing completed.\n")
+cat("Selected files saved in:\n")
+cat(output_folder, "\n")
+cat("File selection summary saved in:\n")
+cat(selection_summary_file, "\n")
+cat("Final statistics tables saved in:\n")
+cat(final_table_csv, "\n")
+cat(final_table_txt, "\n\n")
+
+print(final_results)
