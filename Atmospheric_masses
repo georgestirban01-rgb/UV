@@ -1,0 +1,125 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "DAV", "GOB"
+station_name <- "STATION_CODE"
+
+# Enter the station altitude above sea level, in meters
+station_altitude <- NA
+
+# Enter the path to the folder containing the input CSV files
+input_folder <- "PATH_TO_INPUT_FOLDER"
+
+# Output folder
+output_folder <- file.path(input_folder, "Atmospheric_masses")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# Stop if station altitude was not provided
+if (is.na(station_altitude)) {
+  stop("Please enter the station altitude in meters in the variable 'station_altitude'.")
+}
+
+# =========================================================
+# GENERIC OPTICAL AIR MASS FUNCTION
+# =========================================================
+
+optical_air_mass <- function(zenith_deg, a1, a2, a3, a4) {
+  
+  z <- suppressWarnings(as.numeric(zenith_deg))
+  
+  z[z > 90] <- NA
+  z[z < 0]  <- NA
+  
+  1 / (cos(z * pi / 180) + a1 * (z^a2) * ((a3 - z)^a4))
+}
+
+# =========================================================
+# AIR MASS FUNCTIONS FOR DIFFERENT ATMOSPHERIC COMPONENTS
+# =========================================================
+
+air_mass_rayleigh <- function(zenith_deg) {
+  optical_air_mass(zenith_deg, 4.5665e-1, 0.07, 96.4836, -1.6970)
+}
+
+air_mass_gases <- function(zenith_deg) {
+  optical_air_mass(zenith_deg, 4.5665e-1, 0.07, 96.4836, -1.6970)
+}
+
+air_mass_ozone <- function(zenith_deg) {
+  optical_air_mass(zenith_deg, 2.6845e2, 0.5, 115.420, -3.2922)
+}
+
+air_mass_water_vapor <- function(zenith_deg) {
+  optical_air_mass(zenith_deg, 3.1141e-2, 0.1, 92.4710, -1.3814)
+}
+
+air_mass_aerosols <- function(zenith_deg) {
+  optical_air_mass(zenith_deg, 3.1141e-2, 0.1, 92.4710, -1.3814)
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder.")
+}
+
+# =========================================================
+# PROCESS EACH FILE
+# =========================================================
+
+for (f in files) {
+  
+  cat("Processing station:", station_name,
+      "| File:", basename(f), "\n")
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  if (!("zenith" %in% names(df))) {
+    cat(" -> Skipping file: missing 'zenith' column\n\n")
+    next
+  }
+  
+  df$zenith <- suppressWarnings(as.numeric(df$zenith))
+  
+  # Calculate atmospheric air masses
+  df$air_mass_gases    <- air_mass_gases(df$zenith)
+  df$air_mass_rayleigh <- air_mass_rayleigh(df$zenith)
+  df$air_mass_aerosols <- air_mass_aerosols(df$zenith)
+  df$air_mass_ozone    <- air_mass_ozone(df$zenith)
+  df$air_mass_water    <- air_mass_water_vapor(df$zenith)
+  
+  # Correct Rayleigh air mass for station altitude
+  df$air_mass_rayleigh_corrected <-
+    df$air_mass_rayleigh * exp(-0.0001184 * station_altitude)
+  
+  output_file <- file.path(output_folder, basename(f))
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE
+  )
+  
+  cat("Saved:", output_file, "\n\n")
+}
+
+cat("Processing completed for station:", station_name, "\n")
