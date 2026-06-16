@@ -1,0 +1,365 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION AND FOLDER CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "DAV", "GOB"
+station_name <- "STATION_CODE"
+
+# Enter the path to the folder containing the CSV files
+# produced by 01_air_mass_calculation.R
+input_folder <- "PATH_TO_ATMOSPHERIC_MASSES_FOLDER"
+
+# Output folder for transmittance results
+output_folder <- file.path(input_folder, "Transmittance_results")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# =========================================================
+# FUNCTION TO SET INVALID TRANSMITTANCE VALUES TO NA
+# =========================================================
+
+set_out_of_range_to_na <- function(x, variable_name, file_name) {
+  
+  n_below_0 <- sum(!is.na(x) & x < 0)
+  n_above_1 <- sum(!is.na(x) & x > 1)
+  n_total <- n_below_0 + n_above_1
+  
+  cat("  [", file_name, "] ", variable_name,
+      " -> outside [0,1]: ", n_total,
+      " rows (below 0: ", n_below_0,
+      ", above 1: ", n_above_1, ")\n", sep = "")
+  
+  x[x < 0 | x > 1] <- NA
+  
+  list(
+    x = x,
+    n_below_0 = n_below_0,
+    n_above_1 = n_above_1,
+    n_total = n_total
+  )
+}
+
+# =========================================================
+# BROADBAND TRANSMITTANCE FUNCTIONS
+# =========================================================
+
+transmittance_gases <- function(m, lo3) {
+  exp(
+    (-0.006589 * m^0.8 + 0.009721 * (m * lo3)^0.1) -
+      0.007302 * lo3^0.18
+  )
+}
+
+transmittance_rayleigh <- function(m, lo3) {
+  exp(
+    -0.6175 * m^0.9 -
+      0.0409 * (m * lo3)^(-0.1) +
+      0.114 * lo3^0.3
+  )
+}
+
+transmittance_aerosols <- function(m, beta, alpha) {
+  0.224947 * exp(-m * beta * (0.32^(-alpha))) +
+    0.7749937 * exp(-m * beta * (0.38^(-alpha)))
+}
+
+transmittance_ozone <- function(m, lo3) {
+  
+  numerator <- 1 +
+    0.626229 * (m * lo3)^0.1 +
+    4.293047 * lo3 +
+    2.497782 * m^0.4
+  
+  denominator <- 1 +
+    1.40567 * (m * lo3)^0.5 +
+    5.143092 * lo3 +
+    2.973992 * m^0.4
+  
+  numerator / denominator
+}
+
+transmittance_water_vapor <- function(n) {
+  rep(1, n)
+}
+
+total_transmittance <- function(tg, tr, ta, to, tw) {
+  tg * tr * ta * to * tw
+}
+
+# =========================================================
+# SPENCER EARTH-SUN DISTANCE CORRECTION
+# =========================================================
+
+spencer_orbital_correction <- function(day_of_year) {
+  
+  gamma <- 2 * pi * (day_of_year - 1) / 365
+  
+  1.000110 +
+    0.034221 * cos(gamma) +
+    0.001280 * sin(gamma) +
+    0.000719 * cos(2 * gamma) +
+    0.000077 * sin(2 * gamma)
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder.")
+}
+
+# =========================================================
+# SUMMARY TABLE FOR INVALID VALUES
+# =========================================================
+
+invalid_summary <- data.frame(
+  file = character(),
+  n_rows = integer(),
+  
+  tau_gases_below_0 = integer(),
+  tau_gases_above_1 = integer(),
+  tau_gases_total_invalid = integer(),
+  
+  tau_rayleigh_below_0 = integer(),
+  tau_rayleigh_above_1 = integer(),
+  tau_rayleigh_total_invalid = integer(),
+  
+  tau_aerosols_below_0 = integer(),
+  tau_aerosols_above_1 = integer(),
+  tau_aerosols_total_invalid = integer(),
+  
+  tau_ozone_below_0 = integer(),
+  tau_ozone_above_1 = integer(),
+  tau_ozone_total_invalid = integer(),
+  
+  tau_water_below_0 = integer(),
+  tau_water_above_1 = integer(),
+  tau_water_total_invalid = integer(),
+  
+  tau_total_below_0 = integer(),
+  tau_total_above_1 = integer(),
+  tau_total_total_invalid = integer(),
+  tau_total_valid_final = integer(),
+  
+  stringsAsFactors = FALSE
+)
+
+# =========================================================
+# PROCESS EACH FILE
+# =========================================================
+
+for (f in files) {
+  
+  cat("Processing station:", station_name,
+      "| File:", basename(f), "\n")
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  required_columns <- c(
+    "DOY",
+    "air_mass_gases",
+    "air_mass_rayleigh_corrected",
+    "air_mass_aerosols",
+    "air_mass_ozone",
+    "lo3cm",
+    "beta",
+    "alpha"
+  )
+  
+  missing_columns <- setdiff(required_columns, names(df))
+  
+  if (length(missing_columns) > 0) {
+    cat(
+      "  -> Skipping file. Missing required columns:",
+      paste(missing_columns, collapse = ", "),
+      "\n\n"
+    )
+    next
+  }
+  
+  n_initial <- nrow(df)
+  
+  # Convert empty cells and blank spaces to NA only for required numeric columns
+  for (col in required_columns) {
+    x <- trimws(as.character(df[[col]]))
+    x[x == ""] <- NA
+    df[[col]] <- suppressWarnings(as.numeric(x))
+  }
+  
+  cat("  Total rows preserved:", n_initial, "\n")
+  
+  # Spencer correction factor
+  df$E0_spencer <- spencer_orbital_correction(df$DOY)
+  
+  # Raw transmittance calculations
+  tau_gases_raw <- transmittance_gases(
+    df$air_mass_gases,
+    df$lo3cm
+  )
+  
+  tau_rayleigh_raw <- transmittance_rayleigh(
+    df$air_mass_rayleigh_corrected,
+    df$lo3cm
+  )
+  
+  tau_aerosols_raw <- transmittance_aerosols(
+    df$air_mass_aerosols,
+    df$beta,
+    df$alpha
+  )
+  
+  tau_ozone_raw <- transmittance_ozone(
+    df$air_mass_ozone,
+    df$lo3cm
+  )
+  
+  tau_water_raw <- transmittance_water_vapor(nrow(df))
+  
+  # Set values outside [0,1] to NA
+  res_tau_gases <- set_out_of_range_to_na(
+    tau_gases_raw,
+    "tau_gases",
+    basename(f)
+  )
+  
+  res_tau_rayleigh <- set_out_of_range_to_na(
+    tau_rayleigh_raw,
+    "tau_rayleigh",
+    basename(f)
+  )
+  
+  res_tau_aerosols <- set_out_of_range_to_na(
+    tau_aerosols_raw,
+    "tau_aerosols",
+    basename(f)
+  )
+  
+  res_tau_ozone <- set_out_of_range_to_na(
+    tau_ozone_raw,
+    "tau_ozone",
+    basename(f)
+  )
+  
+  res_tau_water <- set_out_of_range_to_na(
+    tau_water_raw,
+    "tau_water",
+    basename(f)
+  )
+  
+  df$tau_gases <- res_tau_gases$x
+  df$tau_rayleigh <- res_tau_rayleigh$x
+  df$tau_aerosols <- res_tau_aerosols$x
+  df$tau_ozone <- res_tau_ozone$x
+  df$tau_water <- res_tau_water$x
+  
+  # Total transmittance calculated from cleaned component values
+  tau_total_raw <- total_transmittance(
+    df$tau_gases,
+    df$tau_rayleigh,
+    df$tau_aerosols,
+    df$tau_ozone,
+    df$tau_water
+  )
+  
+  res_tau_total <- set_out_of_range_to_na(
+    tau_total_raw,
+    "tau_total",
+    basename(f)
+  )
+  
+  df$tau_total <- res_tau_total$x
+  
+  n_tau_total_valid <- sum(!is.na(df$tau_total))
+  
+  cat(
+    "  Final valid tau_total rows: ",
+    n_tau_total_valid,
+    " out of ",
+    nrow(df),
+    "\n",
+    sep = ""
+  )
+  
+  output_file <- file.path(output_folder, basename(f))
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE,
+    na = "NA"
+  )
+  
+  invalid_summary <- rbind(
+    invalid_summary,
+    data.frame(
+      file = basename(f),
+      n_rows = nrow(df),
+      
+      tau_gases_below_0 = res_tau_gases$n_below_0,
+      tau_gases_above_1 = res_tau_gases$n_above_1,
+      tau_gases_total_invalid = res_tau_gases$n_total,
+      
+      tau_rayleigh_below_0 = res_tau_rayleigh$n_below_0,
+      tau_rayleigh_above_1 = res_tau_rayleigh$n_above_1,
+      tau_rayleigh_total_invalid = res_tau_rayleigh$n_total,
+      
+      tau_aerosols_below_0 = res_tau_aerosols$n_below_0,
+      tau_aerosols_above_1 = res_tau_aerosols$n_above_1,
+      tau_aerosols_total_invalid = res_tau_aerosols$n_total,
+      
+      tau_ozone_below_0 = res_tau_ozone$n_below_0,
+      tau_ozone_above_1 = res_tau_ozone$n_above_1,
+      tau_ozone_total_invalid = res_tau_ozone$n_total,
+      
+      tau_water_below_0 = res_tau_water$n_below_0,
+      tau_water_above_1 = res_tau_water$n_above_1,
+      tau_water_total_invalid = res_tau_water$n_total,
+      
+      tau_total_below_0 = res_tau_total$n_below_0,
+      tau_total_above_1 = res_tau_total$n_above_1,
+      tau_total_total_invalid = res_tau_total$n_total,
+      tau_total_valid_final = n_tau_total_valid,
+      
+      stringsAsFactors = FALSE
+    )
+  )
+  
+  cat("Saved:", output_file, "\n\n")
+}
+
+# =========================================================
+# SAVE INVALID VALUE SUMMARY
+# =========================================================
+
+summary_file <- file.path(
+  output_folder,
+  "invalid_transmittance_values_summary.csv"
+)
+
+write.csv(
+  invalid_summary,
+  summary_file,
+  row.names = FALSE
+)
+
+cat("Processing completed.\n")
+cat("Output files saved in:\n")
+cat(output_folder, "\n")
+cat("Invalid value summary saved in:\n")
+cat(summary_file, "\n")
