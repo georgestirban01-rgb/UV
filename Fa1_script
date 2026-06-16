@@ -1,0 +1,148 @@
+options(stringsAsFactors = FALSE)
+
+# =========================================================
+# STATION AND FOLDER CONFIGURATION
+# =========================================================
+
+# Enter the station identifier/code, e.g., "IZA", "PAY", "DAV"
+station_name <- "STATION_CODE"
+
+# Enter the path to the folder containing the CSV files
+# produced by 02_broadband_transmittance_calculation.R
+input_folder <- "PATH_TO_TRANSMITTANCE_RESULTS_FOLDER"
+
+# Output folder for Fa1 results
+output_folder <- file.path(input_folder, "Fa1_results")
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# CSV file containing the asymmetry factor g for each input file
+# Required columns: file, g
+g_values_file <- file.path(output_folder, "g_values.csv")
+
+# =========================================================
+# FORWARD SCATTERING CORRECTION FUNCTION Fa1
+# =========================================================
+
+Fa1_function <- function(zenith_deg, g) {
+  
+  z <- suppressWarnings(as.numeric(zenith_deg))
+  
+  z[z < 0] <- NA
+  z[z > 90] <- NA
+  
+  cos_z <- cos(z * pi / 180)
+  log_g <- log(1 - g)
+  
+  as0 <- (1.459 + (0.1595 + 0.4129 * log_g) * log_g) * log_g
+  as1 <- (0.0783 - (0.3824 + 0.5874 * log_g) * log_g) * log_g
+  
+  1 - 0.5 * exp((as0 + as1 * cos_z) * cos_z)
+}
+
+# =========================================================
+# READ ASYMMETRY FACTOR VALUES
+# =========================================================
+
+if (!file.exists(g_values_file)) {
+  stop("The file containing g values does not exist: ", g_values_file)
+}
+
+g_table <- read.csv(
+  g_values_file,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+if (!all(c("file", "g") %in% names(g_table))) {
+  stop("The file g_values.csv must contain the columns: file and g")
+}
+
+g_table$file <- trimws(g_table$file)
+g_table$g <- suppressWarnings(as.numeric(g_table$g))
+
+if (any(is.na(g_table$g))) {
+  stop("Invalid g values were found in: ", g_values_file)
+}
+
+if (any(g_table$g <= 0 | g_table$g >= 1)) {
+  stop("All g values must be strictly between 0 and 1 in: ", g_values_file)
+}
+
+# =========================================================
+# SEARCH FOR INPUT CSV FILES
+# =========================================================
+
+files <- list.files(
+  input_folder,
+  pattern = "\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No CSV files were found in the input folder: ", input_folder)
+}
+
+files <- sort(files)
+
+# =========================================================
+# PROCESS EACH FILE USING THE CORRESPONDING g VALUE
+# =========================================================
+
+for (f in files) {
+  
+  file_name <- basename(f)
+  
+  cat("\n========================================\n")
+  cat("Processing station:", station_name,
+      "| File:", file_name, "\n")
+  
+  idx <- which(g_table$file == file_name)
+  
+  if (length(idx) == 0) {
+    cat("  -> Skipping file: no g value found in g_values.csv\n")
+    next
+  }
+  
+  if (length(idx) > 1) {
+    cat("  -> Skipping file: multiple g values found for this file in g_values.csv\n")
+    next
+  }
+  
+  current_g <- g_table$g[idx]
+  
+  df <- read.csv(
+    f,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  if (!("zenith" %in% names(df))) {
+    cat("  -> Skipping file: missing 'zenith' column\n")
+    next
+  }
+  
+  df$zenith <- suppressWarnings(as.numeric(df$zenith))
+  df$Fa1 <- Fa1_function(df$zenith, g = current_g)
+  
+  output_file <- file.path(output_folder, file_name)
+  
+  write.csv(
+    df,
+    output_file,
+    row.names = FALSE,
+    na = "NA"
+  )
+  
+  cat("  g used:", current_g, "\n")
+  cat("  NA zenith:", sum(is.na(df$zenith)), "\n")
+  cat("  NA Fa1:", sum(is.na(df$Fa1)), "\n")
+  cat("Saved:", output_file, "\n")
+}
+
+cat("\n========================================\n")
+cat("Processing completed. Files were processed using g values from:\n")
+cat(g_values_file, "\n")
